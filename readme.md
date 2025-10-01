@@ -57,7 +57,7 @@ var unpacked = pack.unpack(packed)
 ```
 
 ## 🎉 Installation
-Copy `godot-pack.gdextension` to your Godot's project folder, replace the paths to a relative ones to where the repository is put.
+Copy and rename `godot-pack.gdextension.template` as `godot-pack.gdextension` to your Godot's project folder, replace the paths to a relative ones to where the repository is put.
 Compile with `cargo build --release`, have fun.
 
 ### 🫣 P.S.
