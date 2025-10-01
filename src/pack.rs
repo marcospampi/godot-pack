@@ -1,13 +1,5 @@
-use crate::pack;
 use godot::classes::RefCounted;
 use godot::prelude::*;
-use std::panic;
-
-#[derive(Debug, Clone)]
-enum PackError {
-    InvalidSequence,
-    WriteConversionFailure,
-}
 
 #[derive(Debug, Clone)]
 enum FieldType {
@@ -28,19 +20,19 @@ enum FieldType {
     Double,
 }
 #[derive(Clone, Debug)]
-enum ByteOrder {
+enum Endianness {
     LittleEndian,
     BigEndian,
 }
 
-impl ByteOrder {
+impl Endianness {
     #[cfg(target_endian = "little")]
-    const NATIVE: ByteOrder = Self::LittleEndian;
+    const NATIVE: Endianness = Self::LittleEndian;
 
     #[cfg(target_endian = "big")]
-    const NATIVE: ByteOrder = Self::BigEndian;
+    const NATIVE: Endianness = Self::BigEndian;
 
-    const NETWORK: ByteOrder = Self::BigEndian;
+    const NETWORK: Endianness = Self::BigEndian;
 }
 
 #[derive(Debug, Clone)]
@@ -51,15 +43,15 @@ struct FieldDescriptior {
 }
 
 #[derive(Debug, Clone)]
-struct PackingDescriptor {
+pub(crate) struct PackingDescriptor {
     fields: Vec<FieldDescriptior>,
     size: usize,
-    order: ByteOrder,
+    endianness: Endianness,
 }
 
 impl PackingDescriptor {
-    pub(crate) fn sequence_from(seq: &str) -> Result<PackingDescriptor, PackError> {
-        let mut order: ByteOrder = ByteOrder::NATIVE;
+    pub(crate) fn sequence_from(seq: &str) -> Result<PackingDescriptor, ()> {
+        let mut order: Endianness = Endianness::NATIVE;
         let mut fields: Vec<FieldDescriptior> = vec![];
 
         let mut running_length: usize = 0;
@@ -76,16 +68,16 @@ impl PackingDescriptor {
             } else {
                 match c {
                     '@' | '=' => {
-                        order = ByteOrder::NATIVE;
+                        order = Endianness::NATIVE;
                     }
                     '<' => {
-                        order = ByteOrder::LittleEndian;
+                        order = Endianness::LittleEndian;
                     }
                     '>' => {
-                        order = ByteOrder::BigEndian;
+                        order = Endianness::BigEndian;
                     }
                     '!' => {
-                        order = ByteOrder::NETWORK;
+                        order = Endianness::NETWORK;
                     }
                     's' => {
                         let length = running_length.clamp(1, u16::MAX as _) as _;
@@ -213,7 +205,8 @@ impl PackingDescriptor {
                         });
                     }
                     _ => {
-                        return Err(PackError::InvalidSequence);
+                        godot_error!("Invalid pattern processed.");
+                        return Err(());
                     }
                 }
                 running_length = 0;
@@ -223,14 +216,40 @@ impl PackingDescriptor {
         Ok(PackingDescriptor {
             fields,
             size: offset,
-            order,
+            endianness: order,
         })
     }
 }
 
+/// An helper object to pack and unpack binary data using a common format, much alike python's struct library.
+/// Use `Pack.from(format)` to construct an instance, follows the format character table:
+/// | Character | Meaning / Action                                          | Size (bytes)     |
+/// | --------- | --------------------------------------------------------- | ---------------- |
+/// | `@` / `=` | Set native endianness                                     | –                |
+/// | `<`       | Set little-endian                                         | –                |
+/// | `>`       | Set big-endian                                            | –                |
+/// | `!`       | Set network endianness (big-endian)                       | –                |
+/// | `...s`    | Preceded by `...` digits as length, a null terminated string          | ... or at least one byte |
+/// | `...x`       | Preceded by `...` digits as length, padding space                     | ... or at least one byte |
+/// | `?`       | Boolean                                                   | 1                |
+/// | `c`       | Character (byte)                                          | 1                |
+/// | `b`       | Signed 8-bit integer                                      | 1                |
+/// | `B`       | Unsigned 8-bit integer                                    | 1                |
+/// | `h`       | Signed 16-bit integer                                     | 2                |
+/// | `H`       | Unsigned 16-bit integer                                   | 2                |
+/// | `i`       | Signed 32-bit integer (`c_int`)                           | 4                |
+/// | `I`       | Unsigned 32-bit integer (`c_uint`)                        | 4                |
+/// | `l`       | Signed 32-bit integer (long)                              | 4                |
+/// | `L`       | Unsigned 32-bit integer (long)                            | 4                |
+/// | `q`       | Signed 64-bit integer (long long)                         | 8                |
+/// | `Q`       | Unsigned 64-bit integer (long long)                       | 8                |
+/// | `f`       | 32-bit floating point                                     | 4                |
+/// | `d`       | 64-bit floating point                                     | 8                |
+/// | *other*   | Invalid pattern (error)                                   | –                |
+
 #[derive(GodotClass, Debug)]
 #[class(no_init,base=RefCounted)]
-struct Pack {
+pub struct Pack {
     #[var]
     pub original: GString,
 
@@ -240,35 +259,47 @@ struct Pack {
 
 #[godot_api]
 impl Pack {
+    /// Constructs an instance.
     #[func]
-    fn from(pack_string: GString) -> Gd<Self> {
-        let descriptor = PackingDescriptor::sequence_from(&pack_string.to_string()).unwrap();
-        Gd::from_init_fn(|base| Self {
-            descriptor,
-            original: pack_string,
-            base,
-        })
+    pub fn from(format: GString) -> Option<Gd<Self>> {
+        if let Ok(descriptor) = PackingDescriptor::sequence_from(&format.to_string()) {
+            Some(Gd::from_init_fn(|base| Self {
+                descriptor,
+                original: format,
+                base,
+            }))
+        } else {
+            None
+        }
+    }
+    /// Packs a variant array into either a `PackedByteArray` or `nil` if erroers.
+    #[func]
+    pub fn pack(&self, data: VariantArray) -> Variant {
+        match self.pack_impl(data) {
+            Ok(result) => Variant::from(result),
+            Err(_) => return Variant::nil(),
+        }
     }
 
-    #[func]
-    pub(crate) fn pack(&self, data: VariantArray) -> PackedByteArray {
+    pub(crate) fn pack_impl(&self, data: VariantArray) -> Result<PackedByteArray, ()> {
         macro_rules! write_variant_as {
             ($variant:expr, $slice:expr, $bounds:expr, $endianess:expr, $T:ty) => {{
                 if let Ok(value) = $variant.try_to_relaxed::<$T>() {
                     match $endianess {
-                        ByteOrder::BigEndian => {
+                        Endianness::BigEndian => {
                             $slice[$bounds].copy_from_slice(&value.to_be_bytes());
                         }
-                        ByteOrder::LittleEndian => {
+                        Endianness::LittleEndian => {
                             $slice[$bounds].copy_from_slice(&value.to_le_bytes());
                         }
                     }
+                } else {
+                    return Err(());
                 }
             }};
         }
-        godot_script_error!("{:#?}", self);
         let mut output = PackedByteArray::new();
-        let endianess = self.descriptor.order.clone();
+        let endianess = self.descriptor.endianness.clone();
         output.resize(self.descriptor.size);
         output.fill(0u8);
         {
@@ -279,7 +310,8 @@ impl Pack {
                     FieldType::String => {
                         let string = variant.to_string();
                         let bytes = string.as_bytes();
-                        slice[bounds].copy_within(bytes);
+                        let min_size = usize::min(bytes.len(), descriptor.length);
+                        slice[bounds][..min_size].copy_from_slice(&bytes[..min_size]);
                     }
                     FieldType::Character => {
                         let string = variant.to_string().as_bytes().first().cloned();
@@ -326,26 +358,92 @@ impl Pack {
             }
         }
 
-        return output;
+        Ok(output)
     }
+    /// Unpacks a `PackedByteArray` into either a `VariantArray` or `nil` if erroers.
     #[func]
-    pub(crate) fn unpack(&self) -> VariantArray {
-        todo!()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    // Note this useful idiom: importing names from outer (for mod tests) scope.
-    use super::*;
-
-    #[test]
-    fn pack() {
-        let pack = Pack::from(GString::from("@fff"));
-        let args = varray![1.0, 2.0, 3.0];
-        {
-            let binded = pack.bind();
-            binded.pack(args);
+    pub fn unpack(&self, data: PackedByteArray) -> Variant {
+        match self.unpack_impl(data) {
+            Ok(result) => result.to_variant(),
+            Err(()) => Variant::nil(),
         }
+    }
+    pub(crate) fn unpack_impl(&self, data: PackedByteArray) -> Result<VariantArray, ()> {
+        macro_rules! read_variant_from {
+            ($result:expr, $data:expr, $bounds:expr, $endianness:expr, $T:ty) => {{
+                let mut bytes = [0u8; core::mem::size_of::<$T>()];
+                bytes.copy_from_slice(&$data[$bounds]);
+                let extracted = match $endianness {
+                    Endianness::BigEndian => <$T>::from_be_bytes(bytes),
+                    Endianness::LittleEndian => <$T>::from_le_bytes(bytes),
+                };
+                $result.push(&extracted.to_variant());
+            }};
+        }
+        if data.len() != self.descriptor.size {
+            return Err(());
+        }
+        let data = data.as_slice();
+        let mut result = VariantArray::new();
+        let endianness = self.descriptor.endianness.clone();
+        for field in &self.descriptor.fields {
+            let bounds = (field.offset)..(field.offset + field.length);
+            match field.ty {
+                FieldType::String => {
+                    let string = str::from_utf8(&data[bounds])
+                        .map(|s| GString::from(s))
+                        .unwrap();
+                    result.push(&string.to_variant());
+                }
+                FieldType::Character => {
+                    let value = data[field.offset];
+                    let mut str = String::new();
+                    str.push(char::from(value));
+                    result.push(&str.to_variant());
+                }
+                FieldType::Bool => {
+                    let value = data[field.offset] != 0;
+                    result.push(&value.to_variant());
+                }
+                FieldType::Char => {
+                    read_variant_from!(result, data, bounds, endianness, i8);
+                }
+                FieldType::UnsignedChar => {
+                    read_variant_from!(result, data, bounds, endianness, u8);
+                }
+                FieldType::Short => {
+                    read_variant_from!(result, data, bounds, endianness, i16);
+                }
+                FieldType::UnsignedShort => {
+                    read_variant_from!(result, data, bounds, endianness, u16);
+                }
+                FieldType::Int | FieldType::Long => {
+                    read_variant_from!(result, data, bounds, endianness, i32);
+                }
+                FieldType::UnsignedInt | FieldType::UnsignedLong => {
+                    read_variant_from!(result, data, bounds, endianness, u32);
+                }
+                FieldType::LongLong => {
+                    read_variant_from!(result, data, bounds, endianness, i64);
+                }
+                FieldType::UnsignedLongLong => {
+                    read_variant_from!(result, data, bounds, endianness, u64);
+                }
+                FieldType::Float => {
+                    read_variant_from!(result, data, bounds, endianness, f32);
+                }
+                FieldType::Double => {
+                    read_variant_from!(result, data, bounds, endianness, f64);
+                    //let mut bytes = [0u8; core::mem::size_of::<f64>()];
+                    //bytes.copy_from_slice(&data[bounds]);
+                    //let extracted = match endianness {
+                    //    Endianness::BigEndian => f64::from_be_bytes(bytes),
+                    //    Endianness::LittleEndian => f64::from_le_bytes(bytes),
+                    //};
+                    //result.push(&extracted.to_variant());
+                }
+            }
+        }
+        Ok(result)
     }
 }

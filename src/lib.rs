@@ -1,7 +1,7 @@
 use godot::prelude::*;
 
-struct MyExtension;
+struct PackExtension;
 pub mod pack;
 
 #[gdextension]
-unsafe impl ExtensionLibrary for MyExtension {}
+unsafe impl ExtensionLibrary for PackExtension {}
