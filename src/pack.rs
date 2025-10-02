@@ -1,3 +1,5 @@
+use std::io::Empty;
+
 use godot::classes::RefCounted;
 use godot::prelude::*;
 
@@ -219,69 +221,7 @@ impl PackingDescriptor {
             endianness: order,
         })
     }
-}
-
-/// An helper object to pack and unpack binary data using a common format, much alike python's struct library.
-/// Use `Pack.from(format)` to construct an instance, follows the format character table:
-/// | Character | Meaning / Action                                          | Size (bytes)     |
-/// | --------- | --------------------------------------------------------- | ---------------- |
-/// | `@` / `=` | Set native endianness                                     | –                |
-/// | `<`       | Set little-endian                                         | –                |
-/// | `>`       | Set big-endian                                            | –                |
-/// | `!`       | Set network endianness (big-endian)                       | –                |
-/// | `...s`    | Preceded by `...` digits as length, a null terminated string          | ... or at least one byte |
-/// | `...x`       | Preceded by `...` digits as length, padding space                     | ... or at least one byte |
-/// | `?`       | Boolean                                                   | 1                |
-/// | `c`       | Character (byte)                                          | 1                |
-/// | `b`       | Signed 8-bit integer                                      | 1                |
-/// | `B`       | Unsigned 8-bit integer                                    | 1                |
-/// | `h`       | Signed 16-bit integer                                     | 2                |
-/// | `H`       | Unsigned 16-bit integer                                   | 2                |
-/// | `i`       | Signed 32-bit integer (`c_int`)                           | 4                |
-/// | `I`       | Unsigned 32-bit integer (`c_uint`)                        | 4                |
-/// | `l`       | Signed 32-bit integer (long)                              | 4                |
-/// | `L`       | Unsigned 32-bit integer (long)                            | 4                |
-/// | `q`       | Signed 64-bit integer (long long)                         | 8                |
-/// | `Q`       | Unsigned 64-bit integer (long long)                       | 8                |
-/// | `f`       | 32-bit floating point                                     | 4                |
-/// | `d`       | 64-bit floating point                                     | 8                |
-/// | *other*   | Invalid pattern (error)                                   | –                |
-
-#[derive(GodotClass, Debug)]
-#[class(no_init,base=RefCounted)]
-pub struct Pack {
-    #[var]
-    pub original: GString,
-
-    pub(crate) descriptor: PackingDescriptor,
-    base: Base<RefCounted>,
-}
-
-#[godot_api]
-impl Pack {
-    /// Constructs an instance.
-    #[func]
-    pub fn from(format: GString) -> Option<Gd<Self>> {
-        if let Ok(descriptor) = PackingDescriptor::sequence_from(&format.to_string()) {
-            Some(Gd::from_init_fn(|base| Self {
-                descriptor,
-                original: format,
-                base,
-            }))
-        } else {
-            None
-        }
-    }
-    /// Packs a variant array into either a `PackedByteArray` or `nil` if erroers.
-    #[func]
-    pub fn pack(&self, data: VariantArray) -> Variant {
-        match self.pack_impl(data) {
-            Ok(result) => Variant::from(result),
-            Err(_) => return Variant::nil(),
-        }
-    }
-
-    pub(crate) fn pack_impl(&self, data: VariantArray) -> Result<PackedByteArray, ()> {
+    pub(crate) fn pack(&self, data: VariantArray) -> Result<PackedByteArray, ()> {
         macro_rules! write_variant_as {
             ($variant:expr, $slice:expr, $bounds:expr, $endianess:expr, $T:ty) => {{
                 if let Ok(value) = $variant.try_to_relaxed::<$T>() {
@@ -299,12 +239,12 @@ impl Pack {
             }};
         }
         let mut output = PackedByteArray::new();
-        let endianess = self.descriptor.endianness.clone();
-        output.resize(self.descriptor.size);
+        let endianess = self.endianness.clone();
+        output.resize(self.size);
         output.fill(0u8);
         {
             let slice = output.as_mut_slice();
-            for (variant, descriptor) in data.iter_shared().zip(self.descriptor.fields.iter()) {
+            for (variant, descriptor) in data.iter_shared().zip(self.fields.iter()) {
                 let bounds = (descriptor.offset)..(descriptor.offset + descriptor.length);
                 match descriptor.ty {
                     FieldType::String => {
@@ -360,15 +300,7 @@ impl Pack {
 
         Ok(output)
     }
-    /// Unpacks a `PackedByteArray` into either a `VariantArray` or `nil` if erroers.
-    #[func]
-    pub fn unpack(&self, data: PackedByteArray) -> Variant {
-        match self.unpack_impl(data) {
-            Ok(result) => result.to_variant(),
-            Err(()) => Variant::nil(),
-        }
-    }
-    pub(crate) fn unpack_impl(&self, data: PackedByteArray) -> Result<VariantArray, ()> {
+    pub(crate) fn unpack(&self, data: PackedByteArray) -> Result<VariantArray, ()> {
         macro_rules! read_variant_from {
             ($result:expr, $data:expr, $bounds:expr, $endianness:expr, $T:ty) => {{
                 let mut bytes = [0u8; core::mem::size_of::<$T>()];
@@ -380,24 +312,24 @@ impl Pack {
                 $result.push(&extracted.to_variant());
             }};
         }
-        if data.len() < self.descriptor.size {
+        if data.len() < self.size {
             godot_error!(
                 "Data length ({}) is less than expected size ({}).",
                 data.len(),
-                self.descriptor.size
+                self.size
             );
             return Err(());
-        } else if data.len() > self.descriptor.size {
+        } else if data.len() > self.size {
             godot_warn!(
                 "Data length ({}) is greater than expected size ({}).",
                 data.len(),
-                self.descriptor.size
+                self.size
             );
         }
         let data = data.as_slice();
         let mut result = VariantArray::new();
-        let endianness = self.descriptor.endianness.clone();
-        for field in &self.descriptor.fields {
+        let endianness = self.endianness.clone();
+        for field in &self.fields {
             let bounds = (field.offset)..(field.offset + field.length);
             match field.ty {
                 FieldType::String => {
@@ -456,5 +388,139 @@ impl Pack {
             }
         }
         Ok(result)
+    }
+}
+
+/// An helper object to pack and unpack binary data using a common format, much alike python's struct library.
+/// Use `Pack.from(format)` to construct an instance, follows the format character table:
+/// | Character | Meaning / Action                                          | Size (bytes)     |
+/// | --------- | --------------------------------------------------------- | ---------------- |
+/// | `@` / `=` | Set native endianness                                     | –                |
+/// | `<`       | Set little-endian                                         | –                |
+/// | `>`       | Set big-endian                                            | –                |
+/// | `!`       | Set network endianness (big-endian)                       | –                |
+/// | `...s`    | Preceded by `...` digits as length, a null terminated string          | ... or at least one byte |
+/// | `...x`       | Preceded by `...` digits as length, padding space                     | ... or at least one byte |
+/// | `?`       | Boolean                                                   | 1                |
+/// | `c`       | Character (byte)                                          | 1                |
+/// | `b`       | Signed 8-bit integer                                      | 1                |
+/// | `B`       | Unsigned 8-bit integer                                    | 1                |
+/// | `h`       | Signed 16-bit integer                                     | 2                |
+/// | `H`       | Unsigned 16-bit integer                                   | 2                |
+/// | `i`       | Signed 32-bit integer (`c_int`)                           | 4                |
+/// | `I`       | Unsigned 32-bit integer (`c_uint`)                        | 4                |
+/// | `l`       | Signed 32-bit integer (long)                              | 4                |
+/// | `L`       | Unsigned 32-bit integer (long)                            | 4                |
+/// | `q`       | Signed 64-bit integer (long long)                         | 8                |
+/// | `Q`       | Unsigned 64-bit integer (long long)                       | 8                |
+/// | `f`       | 32-bit floating point                                     | 4                |
+/// | `d`       | 64-bit floating point                                     | 8                |
+/// | *other*   | Invalid pattern (error)                                   | –                |
+
+#[derive(GodotClass, Debug)]
+#[class(no_init,base=RefCounted)]
+pub struct Pack {
+    #[var]
+    pub original: GString,
+
+    pub(crate) descriptor: PackingDescriptor,
+    base: Base<RefCounted>,
+}
+
+#[godot_api]
+impl Pack {
+    /// Constructs an instance.
+    #[func]
+    pub fn from(format: GString) -> Option<Gd<Self>> {
+        if let Ok(descriptor) = PackingDescriptor::sequence_from(&format.to_string()) {
+            Some(Gd::from_init_fn(|base| Self {
+                descriptor,
+                original: format,
+                base,
+            }))
+        } else {
+            None
+        }
+    }
+    /// Packs a variant array into either a `PackedByteArray` or `nil` if erroers.
+    #[func]
+    pub fn pack(&self, data: VariantArray) -> Variant {
+        match self.descriptor.pack(data) {
+            Ok(result) => Variant::from(result),
+            Err(_) => return Variant::nil(),
+        }
+    }
+
+    /// Unpacks a `PackedByteArray` into either a `VariantArray` or `nil` if erroers.
+    #[func]
+    pub fn unpack(&self, data: PackedByteArray) -> Variant {
+        match self.descriptor.unpack(data) {
+            Ok(result) => result.to_variant(),
+            Err(()) => Variant::nil(),
+        }
+    }
+}
+
+/// A cached version of `Pack` that allows to pack and unpack multiple formats using only one object.
+#[derive(GodotClass, Debug)]
+#[class(base=RefCounted)]
+pub struct CachedPack {
+    cache: std::collections::HashMap<String, PackingDescriptor>,
+    base: Base<RefCounted>,
+}
+#[godot_api]
+impl IRefCounted for CachedPack {
+    fn init(base: Base<RefCounted>) -> Self {
+        Self {
+            cache: Default::default(),
+            base,
+        }
+    }
+}
+
+#[godot_api]
+impl CachedPack {
+    fn get_or_create_descriptor(&mut self, format: GString) -> Option<&PackingDescriptor> {
+        let key = format.to_string();
+
+        if self.cache.contains_key(&key) {
+            return self.cache.get(&key);
+        }
+        if let Ok(descriptor) = PackingDescriptor::sequence_from(&key) {
+            self.cache.insert(key.clone(), descriptor);
+            return self.cache.get(&key);
+        } else {
+            None
+        }
+    }
+
+    /// Flush internal cache.
+    #[func]
+    fn flush(&mut self) -> () {
+        self.cache.clear();
+    }
+
+    /// Pack data using provided `format'.
+    #[func]
+    pub(crate) fn pack(&mut self, format: GString, data: VariantArray) -> Variant {
+        match self.get_or_create_descriptor(format) {
+            Some(descriptor) => descriptor
+                .pack(data)
+                .map(|v| v.to_variant())
+                .unwrap_or(Variant::nil()),
+            None => Variant::nil(),
+        }
+    }
+
+    /// Unpack data using provided `format'.
+    #[func]
+    pub(crate) fn unpack(&mut self, format: GString, data: PackedByteArray) -> Variant {
+        match self.get_or_create_descriptor(format) {
+            Some(descriptor) => descriptor
+                .unpack(data)
+                .map(|v| v.to_variant())
+                .unwrap_or(Variant::nil()),
+            None => Variant::nil(),
+        }
     }
 }
