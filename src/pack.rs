@@ -380,8 +380,19 @@ impl Pack {
                 $result.push(&extracted.to_variant());
             }};
         }
-        if data.len() != self.descriptor.size {
+        if data.len() < self.descriptor.size {
+            godot_error!(
+                "Data length ({}) is less than expected size ({}).",
+                data.len(),
+                self.descriptor.size
+            );
             return Err(());
+        } else if data.len() > self.descriptor.size {
+            godot_warn!(
+                "Data length ({}) is greater than expected size ({}).",
+                data.len(),
+                self.descriptor.size
+            );
         }
         let data = data.as_slice();
         let mut result = VariantArray::new();
